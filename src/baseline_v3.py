@@ -62,13 +62,46 @@ def load_ground_truth(path):
     return gt
 
 
+from search_engine import MultiPassSearchEngine, find_candidates_from_index as search_engine_find_candidates
+
+
+def build_multipass_index(source_paths, top_k=80):
+    """
+    Role 2 Optimized Search Engine: Multi-Pass Inverted Index.
+    Memory-compact integer indexing, character n-grams, legal suffix,
+    exact name/address, rare tokens, and postal code passes.
+    """
+    engine = MultiPassSearchEngine(default_top_k=top_k)
+    all_ids = set()
+    total = 0
+    for path in source_paths:
+        print(f"  Indexing {os.path.basename(path)} into MultiPassSearchEngine...")
+        count = 0
+        with open(path, encoding='utf-8') as f:
+            f.readline()  # header
+            for line in f:
+                parts = line.rstrip('\n').split('\t')
+                if len(parts) < 2:
+                    continue
+                eid = parts[0]
+                bname = parts[1] if len(parts) > 1 else ''
+                baddr = parts[2] if len(parts) > 2 else ''
+                country = parts[3] if len(parts) > 3 else ''
+                all_ids.add(eid)
+                engine.add_record(eid, bname, baddr, country)
+                count += 1
+                total += 1
+                if count % 1000000 == 0:
+                    print(f"    {count:,} records...")
+        print(f"    Done: {count:,} records")
+    engine.finalize_index()
+    print(f"  MultiPassSearchEngine ready: {total:,} records indexed.")
+    return engine, all_ids
+
+
 def build_inverted_index(source_paths, max_posting_size=50000):
     """
-    Pass 1: Build lightweight inverted index from S2/S3 files.
-    Stores: token -> set of entity_ids
-    Memory: ~3-4GB for 10M records
-    
-    Returns: token_index dict, set of all indexed entity IDs
+    Legacy inverted index builder maintained for backwards compatibility.
     """
     token_index = defaultdict(set)
     all_ids = set()
@@ -123,25 +156,10 @@ def build_inverted_index(source_paths, max_posting_size=50000):
     return dict(token_index), all_ids
 
 
-def find_candidates_from_index(name_tokens, addr_tokens, token_index, top_k=100):
-    """Find top-k candidate entity IDs using inverted index."""
-    scores = Counter()
-    
-    for token in name_tokens:
-        if token in token_index:
-            posting = token_index[token]
-            weight = 1.0 / (1.0 + np.log1p(len(posting)))
-            for cid in posting:
-                scores[cid] += weight * 2.0  # name tokens weighted more
-    
-    for token in addr_tokens:
-        if token in token_index:
-            posting = token_index[token]
-            weight = 1.0 / (1.0 + np.log1p(len(posting)))
-            for cid in posting:
-                scores[cid] += weight
-    
-    return scores.most_common(top_k)
+def find_candidates_from_index(name_tokens, addr_tokens, token_index, top_k=100, s1_rec=None):
+    """Find top-k candidate entity IDs using inverted index or MultiPassSearchEngine."""
+    return search_engine_find_candidates(name_tokens, addr_tokens, token_index, top_k=top_k, s1_rec=s1_rec)
+
 
 
 def load_specific_records(source_paths, needed_ids):
@@ -264,14 +282,14 @@ def compute_features(s1_rec, s2s3_rec):
     return feats
 
 
-def run_validation(val_size=10000, top_k=80, threshold=0.40, mode='train'):
+def run_validation(val_size=10000, top_k=80, threshold=0.40, mode='train', use_multipass=True):
     """
     Two-pass validation pipeline:
     Pass 1: Build index + blocking  
     Pass 2: Load candidate records + features + scoring
     """
     print("=" * 60)
-    print(f"BASELINE v3 - {mode.upper()} mode, {val_size} S1 entities, top_k={top_k}")
+    print(f"BASELINE v3 - {mode.upper()} mode, {val_size} S1 entities, top_k={top_k}, multipass={use_multipass}")
     print("=" * 60)
     t_start = time.time()
     
@@ -287,10 +305,16 @@ def run_validation(val_size=10000, top_k=80, threshold=0.40, mode='train'):
         gt_path = None
     
     # === PASS 1: Build index ===
-    print("\nPASS 1: Building inverted index...")
-    t0 = time.time()
-    token_index, all_s2s3_ids = build_inverted_index([s2_path, s3_path])
-    print(f"  Index built in {time.time()-t0:.0f}s")
+    if use_multipass:
+        print("\nPASS 1: Building Role 2 MultiPassSearchEngine index...")
+        t0 = time.time()
+        token_index, all_s2s3_ids = build_multipass_index([s2_path, s3_path], top_k=top_k)
+        print(f"  Multi-pass index built in {time.time()-t0:.0f}s")
+    else:
+        print("\nPASS 1: Building legacy inverted index...")
+        t0 = time.time()
+        token_index, all_s2s3_ids = build_inverted_index([s2_path, s3_path])
+        print(f"  Legacy index built in {time.time()-t0:.0f}s")
     
     # Load ground truth and select validation entities
     if gt_path:
@@ -357,7 +381,7 @@ def run_validation(val_size=10000, top_k=80, threshold=0.40, mode='train'):
         name_tokens = list(s1_rec['ns_tokens'])  # Use name-without-suffix tokens
         addr_tokens = list(s1_rec['addr_tokens'])
         
-        cands = find_candidates_from_index(name_tokens, addr_tokens, token_index, top_k=top_k)
+        cands = find_candidates_from_index(name_tokens, addr_tokens, token_index, top_k=top_k, s1_rec=s1_rec)
         
         candidates_by_s1[s1_id] = cands
         for cid, _ in cands:
@@ -509,12 +533,14 @@ if __name__ == '__main__':
     parser.add_argument('--val-size', type=int, default=10000)
     parser.add_argument('--top-k', type=int, default=80)
     parser.add_argument('--threshold', type=float, default=0.40)
+    parser.add_argument('--legacy-blocking', action='store_true', help='Use legacy token inverted index instead of MultiPassSearchEngine')
     args = parser.parse_args()
     
     result = run_validation(
         val_size=args.val_size,
         top_k=args.top_k,
         threshold=args.threshold,
+        use_multipass=not args.legacy_blocking,
     )
     
     if isinstance(result, dict):
