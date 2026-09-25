@@ -333,7 +333,31 @@ def run_experiment_suite():
 
     if has_real_data:
         print("Real competition data detected. Running on local validation split...")
-        # Stream or load real data
+        s1_df = pd.read_csv(real_train_s1, sep='\t', dtype=str).fillna('')
+        s1_records = {}
+        for r in s1_df.head(2000).to_dict('records'):
+            eid = r['entity_id']
+            bname = r.get('business_name', '')
+            baddr = r.get('business_address', '')
+            cntry = r.get('country', '')
+            s1_records[eid] = {
+                'entity_id': eid,
+                'business_name': bname,
+                'business_address': baddr,
+                'country': cntry,
+                **build_record_representations(eid, bname, baddr, cntry)
+            }
+        s2_path = os.path.join(BASE_DIR, 'dataset/train/train_source2.tsv')
+        s3_path = os.path.join(BASE_DIR, 'dataset/train/train_source3.tsv')
+        gt_path = os.path.join(BASE_DIR, 'dataset/train/train_ground_truth.tsv')
+        s2s3_records = []
+        if os.path.exists(s2_path):
+            s2s3_records.extend(pd.read_csv(s2_path, sep='\t', dtype=str).fillna('').to_dict('records'))
+        if os.path.exists(s3_path):
+            s2s3_records.extend(pd.read_csv(s3_path, sep='\t', dtype=str).fillna('').to_dict('records'))
+        from baseline_v3 import load_ground_truth
+        ground_truth = load_ground_truth(gt_path) if os.path.exists(gt_path) else {}
+        print(f"Loaded {len(s1_records)} S1 entities, {len(s2s3_records)} candidate records.")
     else:
         print("Competition dataset not present on local disk. Generating high-fidelity benchmark...")
         s1_records, s2s3_records, ground_truth = generate_synthetic_benchmark(n_s1=2000, singleton_rate=0.35, random_seed=42)
