@@ -37,6 +37,7 @@ models/
 output/
 *.tsv
 *.csv
+!experiments/*.csv
 *.pkl
 *.model
 *.json
