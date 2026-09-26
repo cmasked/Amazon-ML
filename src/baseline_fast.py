@@ -14,8 +14,6 @@ This gives an ACCURATE score measurement fast, because:
 - The threshold tuning is valid
 """
 import sys, io, os, time, gc, random, warnings
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-sys.stdout.reconfigure(line_buffering=True)
 warnings.filterwarnings('ignore')
 
 import numpy as np
@@ -25,6 +23,7 @@ from rapidfuzz import fuzz
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from preprocessing import normalize_name, normalize_address, extract_tokens, extract_numbers, remove_legal_suffix
 from evaluate import f05_single_entity, evaluate_predictions
+from features_enhanced import compute_all_enhanced_features
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEED = 42
@@ -336,7 +335,7 @@ def run_fast_experiment(val_size=2000, neg_multiplier=20):
             if cand_id not in all_s2s3:
                 continue
             
-            feats = compute_features(s1_rec, all_s2s3[cand_id])
+            feats = compute_all_enhanced_features(s1_rec, all_s2s3[cand_id])
             feats['block_score'] = block_score
             all_features.append(feats)
             all_labels.append(1 if cand_id in gt_matches else 0)

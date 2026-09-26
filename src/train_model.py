@@ -4,7 +4,6 @@ Uses the features saved by baseline_v3.py.
 Optimizes for macro F0.5.
 """
 import sys, io, os, warnings
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 warnings.filterwarnings('ignore')
 
 import numpy as np
