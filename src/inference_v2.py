@@ -9,7 +9,7 @@ import pandas as pd
 import lightgbm as lgb
 from collections import defaultdict
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from preprocessing import normalize_name, normalize_address, remove_legal_suffix, extract_numbers
 from search_engine import MultiPassSearchEngine
 from features_enhanced import compute_all_enhanced_features
 
@@ -17,6 +17,29 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(BASE_DIR, 'models', 'lgbm_model.txt')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
 THRESHOLD = 0.90
+
+def char_ngrams(text, n=3):
+    if len(text) < n:
+        return set()
+    return set(text[i:i+n] for i in range(len(text) - n + 1))
+
+def preprocess_on_the_fly(eid, bname, baddr, country):
+    """Preprocess a record exactly as done during training."""
+    name_norm = normalize_name(bname)
+    addr_norm = normalize_address(baddr)
+    name_ns = remove_legal_suffix(name_norm)
+    
+    return {
+        'entity_id': eid,
+        'name_norm': name_norm,
+        'addr_norm': addr_norm,
+        'country': country,
+        'name_tokens': frozenset(name_norm.split()),
+        'ns_tokens': frozenset(name_ns.split()),
+        'addr_tokens': frozenset(addr_norm.split()),
+        'name_ngrams': frozenset(char_ngrams(name_norm, 3)),
+        'addr_nums': frozenset(extract_numbers(addr_norm)),
+    }
 
 def run_inference_v2():
     t_start = time.time()
@@ -54,7 +77,7 @@ def run_inference_v2():
                 country = parts[3] if len(parts) > 3 else ''
                 
                 engine.add_record(eid, bname, baddr, country)
-                s2s3_raw[eid] = {'entity_id': eid, 'name_norm': bname, 'addr_norm': baddr, 'country': country}
+                s2s3_raw[eid] = (eid, bname, baddr, country)
                 
                 if (i+1) % 2000000 == 0:
                     print(f"      {i+1:,} records loaded...")
@@ -115,12 +138,13 @@ def run_inference_v2():
             cands = engine.retrieve(s1_rec, top_k=10)
             cand_ids = []
             
-            s1_rec_norm = {'name_norm': bname, 'addr_norm': baddr, 'country': country}
+            s1_feat = preprocess_on_the_fly(s1_id, bname, baddr, country)
             
             for cid, block_score in cands:
                 cand_ids.append(cid)
-                s2s3_rec = s2s3_raw[cid]
-                feats = compute_all_enhanced_features(s1_rec_norm, s2s3_rec)
+                s2s3_tuple = s2s3_raw[cid]
+                s2s3_feat = preprocess_on_the_fly(*s2s3_tuple)
+                feats = compute_all_enhanced_features(s1_feat, s2s3_feat)
                 feats['block_score'] = block_score
                 
                 feat_row = [feats.get(c, 0.0) for c in feature_cols]

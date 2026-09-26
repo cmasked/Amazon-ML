@@ -12,6 +12,7 @@ import lightgbm as lgb
 import pickle
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from preprocessing import normalize_name, normalize_address, remove_legal_suffix, extract_numbers
 from search_engine import MultiPassSearchEngine
 from features_enhanced import compute_all_enhanced_features
 
@@ -25,6 +26,29 @@ worker_engine = None
 worker_s2s3 = None
 worker_model = None
 worker_feature_cols = None
+
+def char_ngrams(text, n=3):
+    if len(text) < n:
+        return set()
+    return set(text[i:i+n] for i in range(len(text) - n + 1))
+
+def preprocess_on_the_fly(eid, bname, baddr, country):
+    """Preprocess a record exactly as done during training."""
+    name_norm = normalize_name(bname)
+    addr_norm = normalize_address(baddr)
+    name_ns = remove_legal_suffix(name_norm)
+    
+    return {
+        'entity_id': eid,
+        'name_norm': name_norm,
+        'addr_norm': addr_norm,
+        'country': country,
+        'name_tokens': frozenset(name_norm.split()),
+        'ns_tokens': frozenset(name_ns.split()),
+        'addr_tokens': frozenset(addr_norm.split()),
+        'name_ngrams': frozenset(char_ngrams(name_norm, 3)),
+        'addr_nums': frozenset(extract_numbers(addr_norm)),
+    }
 
 def init_worker(engine_obj, s2s3_dict, model_path, feature_cols):
     """Initialize the shared objects in each worker process."""
@@ -45,11 +69,12 @@ def process_chunk(s1_chunk):
         s1_id = s1_rec['entity_id']
         cands = worker_engine.retrieve(s1_rec, top_k=10)
         
-        s1_rec_norm = {
-            'name_norm': s1_rec['business_name'], 
-            'addr_norm': s1_rec['business_address'], 
-            'country': s1_rec['country']
-        }
+        s1_feat = preprocess_on_the_fly(
+            s1_id,
+            s1_rec['business_name'],
+            s1_rec['business_address'],
+            s1_rec['country']
+        )
         
         features_list = []
         metadata_list = []
@@ -57,8 +82,9 @@ def process_chunk(s1_chunk):
         
         for cid, block_score in cands:
             cand_ids.append(cid)
-            s2s3_rec = worker_s2s3[cid]
-            feats = compute_all_enhanced_features(s1_rec_norm, s2s3_rec)
+            s2s3_tuple = worker_s2s3[cid]
+            s2s3_feat = preprocess_on_the_fly(*s2s3_tuple)
+            feats = compute_all_enhanced_features(s1_feat, s2s3_feat)
             feats['block_score'] = block_score
             
             feat_row = [feats.get(c, 0.0) for c in worker_feature_cols]
@@ -111,7 +137,7 @@ def run_aws_inference():
                 country = parts[3] if len(parts) > 3 else ''
                 
                 engine.add_record(eid, bname, baddr, country)
-                s2s3_raw[eid] = {'entity_id': eid, 'name_norm': bname, 'addr_norm': baddr, 'country': country}
+                s2s3_raw[eid] = (eid, bname, baddr, country)
                 
     engine.finalize_index()
     print(f"   Engine built. RAM is heavily utilized. Time: {time.time()-t0:.0f}s")
